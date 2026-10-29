@@ -1,0 +1,23 @@
+import { Router } from 'express';
+import { Booking, Room } from '../models.js';
+import { protect, allow } from '../middleware/auth.js';
+const router=Router();
+router.use(protect);
+router.post('/',allow('guest','admin'),async(req,res,next)=>{try{
+ const {roomId,checkIn,checkOut,guests}=req.body, start=new Date(checkIn), end=new Date(checkOut), count=Number(guests);
+ if(!roomId||!checkIn||!checkOut||!Number.isFinite(+start)||!Number.isFinite(+end)||end<=start)return res.status(400).json({message:'Provide valid check-in and check-out dates.'});
+ if(start < new Date(new Date().setHours(0,0,0,0)))return res.status(400).json({message:'Check-in cannot be in the past.'});
+ if(!Number.isInteger(count)||count<1||count>10)return res.status(400).json({message:'Guest count must be between 1 and 10.'});
+ const room=await Room.findOne({_id:roomId,active:true});if(!room)return res.status(404).json({message:'Room not found.'});
+ if(count>room.capacity)return res.status(400).json({message:`This room accommodates up to ${room.capacity} guests.`});
+ if(room.status==='Maintenance')return res.status(409).json({message:'This room is currently under maintenance.'});
+ const conflict=await Booking.exists({room:room._id,status:{$in:['Confirmed','Checked-in']},checkIn:{$lt:end},checkOut:{$gt:start}});
+ if(conflict)return res.status(409).json({message:'This room is already booked for those dates. Choose another room or dates.'});
+ const nights=Math.ceil((end-start)/86400000);const booking=await Booking.create({user:req.user._id,room:room._id,checkIn:start,checkOut:end,guests:count,total:room.price*nights});
+ res.status(201).json({booking:await booking.populate('room','name category image price'),message:'Reservation created. Complete payment separately if enabled.'});
+}catch(e){next(e)}});
+router.get('/mine',async(req,res,next)=>{try{const bookings=await Booking.find({user:req.user._id}).populate('room','name category image price').sort({createdAt:-1});res.json({bookings})}catch(e){next(e)}});
+router.get('/',allow('staff','admin'),async(req,res,next)=>{try{const bookings=await Booking.find().populate('room','name category').populate('user','name email').sort({createdAt:-1}).limit(300);res.json({bookings})}catch(e){next(e)}});
+router.patch('/:id/cancel',async(req,res,next)=>{try{const booking=await Booking.findById(req.params.id);if(!booking)return res.status(404).json({message:'Booking not found.'});if(req.user.role==='guest'&&String(booking.user)!==String(req.user._id))return res.status(403).json({message:'You can only cancel your own reservations.'});if(!['Confirmed'].includes(booking.status))return res.status(400).json({message:'Only confirmed bookings can be cancelled.'});booking.status='Cancelled';if(booking.paymentStatus==='Paid')booking.paymentStatus='Refund requested';await booking.save();res.json({booking,message:booking.paymentStatus==='Refund requested'?'Cancellation recorded. Refund requires payment provider integration.':'Reservation cancelled.'})}catch(e){next(e)}});
+router.post('/:id/pay-demo',async(req,res,next)=>{try{const b=await Booking.findById(req.params.id);if(!b)return res.status(404).json({message:'Booking not found.'});if(req.user.role==='guest'&&String(b.user)!==String(req.user._id))return res.status(403).json({message:'Not your booking.'});if(b.status==='Cancelled')return res.status(400).json({message:'Cancelled bookings cannot be paid.'});b.paymentStatus='Paid';b.paymentReference='DEMO-'+Date.now();await b.save();res.json({booking:b,message:'Demo payment recorded only. No money was charged.'})}catch(e){next(e)}});
+export default router;
